@@ -1,7 +1,5 @@
 import csv
 from sklearn.preprocessing import OneHotEncoder
-import sklearn
-from torch_geometric.data import Data
 from utils import to_dense_adj
 import torch
 import numpy as np
@@ -38,7 +36,6 @@ class IndianVillageGames(torch.utils.data.Dataset):
 
                     categorical_features_matrix = enc.transform(categorical_features_matrix).todense()
                     x = np.concatenate([continuous_features_matrix, categorical_features_matrix], axis=1)
-                    # x = sklearn.preprocessing.normalize(x, axis=0)
 
                 with open(f"{self.root}/adj_allVillageRelationships_HH_vilno_{i}.csv") as csvfile:
                     reader = csv.reader(csvfile, delimiter=',')

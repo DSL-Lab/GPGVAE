@@ -1,3 +1,4 @@
+## we use specformer as the interaction encoder, code from: https://github.com/DSL-Lab/Specformer
 import math
 import torch
 import torch.nn as nn

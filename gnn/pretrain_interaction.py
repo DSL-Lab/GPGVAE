@@ -1,11 +1,9 @@
+## at first stage, we can generate synthetic datasets and use them to pre-train the interaction encoder.
 import os.path as osp
-import os
 import argparse
 import time
 import pickle
 import math
-import random
-import numpy as np
 import torch
 from torch.optim.lr_scheduler import LambdaLR
 from utils import compute_roc_auc_score
@@ -14,14 +12,13 @@ from torch.utils.data import DataLoader
 import dgl
 from games_dataset import Pretrain_Games
 from small_model import MLPClassification, SpecformerSmall
-import wandb
 import warnings
 warnings.filterwarnings("ignore")
-# torch.set_default_dtype(torch.float64)
+
 
 parser = argparse.ArgumentParser('Games')
 parser.add_argument('--seed', type=int, help='Random seed.', default=12)
-parser.add_argument('--n_graphs', type=int, help='Number of graphs', default=2000)
+parser.add_argument('--n_graphs', type=int, help='Number of graphs', default=5000)
 parser.add_argument('--n_games', type=int, help='Number of games', default=100)
 parser.add_argument('--n_epochs', type=int, help='Number of epochs', default=50)
 parser.add_argument('--patience', type=int, help='Patience', default=50)
@@ -40,23 +37,9 @@ parser.add_argument('--hidden_dim', type=int, help='Dimension of node embeddings
 parser.add_argument('--regenerate_data', action='store_true', help='Whether to regenerate the graphs')
 parser.add_argument('--noise_std', type=float, help='B noise std.', default=0.)
 parser.add_argument('--m', type=int, help='Barabasi-Albert parameter m', default=3)
-parser.add_argument('--graph_type', type=str, help='Type of graph', default="barabasi_albert", choices=["barabasi_albert", "erdos_renyi", "watts_strogatz", "indian_village", "yelp", "NYC", "TKY", "IST","SaoPaulo","Jakarta","KualaLampur"])
-parser.add_argument('--game_type', type=str, help='Type of game', default="linear_quadratic", choices=["linear_quadratic", "linear_influence", "barik_honorio", "realworld"])
-
 parser.add_argument('--action_signal_to_noise_ratio', type=float, help='Signal-to-noise ration in synthetic actions', default=10)
-parser.add_argument('--cost_distribution', type=str, help='Type of distribution to use to sample node-wise costs.', default="normal", choices=["normal", "uniform"])
 parser.add_argument('--model_type', type = str, help='Type of model', default="Specformer", choices=["MLP", "Specformer"])
 
-
-def seed_everything(seed):
-    random.seed(seed)
-    os.environ['PYTHONHASHSEED'] = str(seed)
-    np.random.seed(seed)
-    torch.manual_seed(seed)
-    torch.cuda.manual_seed(seed)
-    torch.backends.cudnn.deterministic = True
-    torch.backends.cudnn.benchmark = True
-    torch.backends.cudnn.allow_tf32 = False
     
 
 def count_parameters(model):
@@ -102,8 +85,6 @@ def custom_collate(samples):
         e = torch.sort(e, dim=0, descending=False)[0]
         pad_e = e.new_zeros([max_nodes])   # padding eigenvalues with zero
         pad_e[:num_nodes] = e
-        # pad_e[:num_nodes-1] = torch.FloatTensor(differences)
-
 
         pad_u = u.new_zeros([max_nodes, max_nodes]) # padding eigenvectors with zero
         pad_u[:num_nodes, :num_nodes] = u
@@ -130,17 +111,12 @@ def custom_collate(samples):
 
 
 def run(args):
-    # wandb.init(project="SSVAE", entity="xueyu", config=args)
     model_path = f"../data/models/{args.model_type}.pt"
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     dataset = 'games'
     path = osp.join(osp.dirname(osp.realpath(__file__)), '..', 'data', dataset)  
     dataset = Pretrain_Games(path, n_graphs=args.n_graphs, n_games = args.n_games, m=args.m, signal_to_noise_ratio=args.action_signal_to_noise_ratio,
-                    regenerate_data=args.regenerate_data, cost_distribution=args.cost_distribution)
-    # test_path = osp.join(osp.dirname(osp.realpath(__file__)), '..', 'data', 'test_games') 
-    # test = Games(test_path, n_graphs=100, n_games=args.n_games, n_nodes=30, m=args.m, 
-    #                 target_spectral_radius=0.2, alpha=0, signal_to_noise_ratio=args.action_signal_to_noise_ratio, game_type=args.game_type,
-    #                 regenerate_data=args.regenerate_data, graph_type=args.graph_type,  cost_distribution=args.cost_distribution)
+                    regenerate_data=args.regenerate_data)
     
     train, valid, test = torch.utils.data.random_split(dataset, [int(0.8*len(dataset)), int(0.1*len(dataset)), len(dataset)-int(0.9*len(dataset))]) 
     train_dataloader = DataLoader(train, batch_size = args.batch_size, collate_fn=custom_collate, shuffle = True)
@@ -169,15 +145,12 @@ def run(args):
     train_accuracy = []
     val_accuracy = []
     test_accuracy = []
-
     model.train()
-    # # wandb.watch(model, log="all", log_freq=10)
-
     for epoch in range(args.n_epochs):
         epoch_loss = 0
 
         for data in train_dataloader:
-            e, u, g, length, y, edge_indices = data   # eigenvalue, eigenvector, X, A, label
+            e, u, g, length, y, edge_indices = data   
             e, u, g, length, y = e.to(device), u.to(device), g.to(device), length.to(device), y.to(device)
 
             if args.model_type == 'Specformer':
@@ -213,10 +186,8 @@ def run(args):
         if epoch > args.patience and max(val_accuracy[-args.patience:]) < max(val_accuracy):
             print("Early stopping")
             break
-        # wandb.log({'train loss':epoch_loss, 'val': val_acc, 'test': test_acc})
 
     print("Training finished in {:.4f}s".format(time.time() - start))
-    # wandb.finish()
 
     models_results["test_acc"] = test_accuracy
     models_results["train_acc"] = train_accuracy
@@ -226,9 +197,8 @@ def run(args):
     print(f'results saved in results_'+str(args.model_type)+'.pickle')
 
 
-
 def binary_accuracy(model, data_loader, model_type):
-    model.eval()  # Set the model to evaluation mode, very important!!!
+    model.eval()
     correct = 0
     total = 0
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -250,7 +220,6 @@ def binary_accuracy(model, data_loader, model_type):
 
 
 if __name__ == "__main__":
-    ## pre-training
     args = parser.parse_args()
     run(args)
     

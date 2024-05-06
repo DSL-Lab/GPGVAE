@@ -3,15 +3,12 @@ import os
 import torch
 from games_dataset import Games
 from indian_village_dataset import IndianVillageGames
-from sklearn import preprocessing
 import pickle
 import dgl
 from torch_geometric.data import Data
 from small_model import to_dgl
 from torch.utils.data import DataLoader
-from community import community_louvain
-from networkx.algorithms.community import girvan_newman
-import networkx as nx
+
 
 def data_preprocess(args):
     if args.game_type == 'village':
@@ -27,11 +24,7 @@ def data_preprocess(args):
             G = Data(x = X, edge_index = torch.tensor(edges))
             G = to_dgl(G)
             new_dataset.append({"X": X, "A": A, "g": G})      
-            print(f'number of users: {X.shape[0]}, number of businesses: {X.shape[1]}')
-            # Louvain_community = community_louvain.best_partition(nx.from_numpy_array(A.numpy()))
-            # comp = girvan_newman(nx.from_numpy_array(A.numpy()))
-            # GN_communities = tuple(sorted(c) for c in next(comp))
-            # print(f'number of users: {X.shape[0]}, number of businesses: {X.shape[1]}, Louvain communities: {len(set(Louvain_community.values()))}')           
+            print(f'number of users: {X.shape[0]}, number of businesses: {X.shape[1]}')         
 
     elif args.game_type == 'Yelp':      
         data_name = os.path.join('Yelp', str(args.graph_type)+'_food.pickle')
@@ -52,8 +45,7 @@ def data_preprocess(args):
             A = torch.FloatTensor(dataset[i]['A'])         
             edges = A.nonzero().t()
             G = Data(x = X, edge_index = torch.tensor(edges)) 
-            Louvain_community = community_louvain.best_partition(nx.from_numpy_array(A.numpy()))
-            print(f'number of users: {X.shape[0]}, number of businesses: {X.shape[1]}, Louvain communities: {len(set(Louvain_community.values()))}')
+            print(f'number of users: {X.shape[0]}, number of businesses: {X.shape[1]}')
             G = to_dgl(G)
             new_dataset.append({"X": X, "A": A, "g": G})      
         print(f'number of graphs: {len(new_dataset)}')
@@ -70,18 +62,17 @@ def data_preprocess(args):
             X = torch.FloatTensor(X)       
             edges = A.nonzero().t()
             G = Data(x = X, edge_index = torch.tensor(edges)) 
-            Louvain_community = community_louvain.best_partition(nx.from_numpy_array(A.numpy()))
-            print(f'number of users: {X.shape[0]}, number of businesses: {X.shape[1]}, Louvain communities: {len(set(Louvain_community.values()))}')
+            print(f'number of users: {X.shape[0]}, number of businesses: {X.shape[1]}')
             G = to_dgl(G)
             new_dataset.append({"X": X, "A": A, "g": G})      
 
-    elif args.graph_type == 'barabasi_albert' or args.graph_type == 'erdos_renyi' or args.graph_type == 'watts_strogatz' or args.graph_type == 'stochastic_block_model':
+    elif args.graph_type == 'barabasi_albert' or args.graph_type == 'erdos_renyi' or args.graph_type == 'watts_strogatz':
         data_name = 'games'
         path = osp.join(osp.dirname(osp.realpath(__file__)), '..', 'data', data_name)
         new_dataset = Games(path, n_graphs=args.n_graphs, n_games=args.n_games, n_nodes=args.n_nodes, m=args.m, 
                     target_spectral_radius=args.target_spectral_radius, alpha=args.alpha,
                     signal_to_noise_ratio=args.action_signal_to_noise_ratio, game_type=args.game_type,
-                    regenerate_data=args.regenerate_data, graph_type=args.graph_type,  cost_distribution=args.cost_distribution)
+                    regenerate_data=args.regenerate_data, graph_type=args.graph_type)
     else:
         raise NotImplementedError
 
@@ -174,6 +165,7 @@ def to_device(x, device):
     else:
         return x.to(device)
 
+## get prior distribution for second-stage training, you can pre-train a interaction model and load it here.
 def gated_prior(args, dataset, pre_model, device):
     data_loader = DataLoader(dataset,  batch_size = args.batch_size, collate_fn=custom_collate, shuffle = False)
 
@@ -192,7 +184,7 @@ def gated_prior(args, dataset, pre_model, device):
                 labels.append(y_pred[0].item())
             else:       
                 for j in range(E.shape[0]):
-                    labels.append(y_pred[j,0].item())    # [B]   prior id, if label = 1: correlation, else: anticorrelation
+                    labels.append(y_pred[j,0].item())    # [B]   prior id, if label = 1: correlation, 0: anticorrelation
         del pre_model
         torch.cuda.empty_cache()
     elif args.pre_model_type == 'MLP':
@@ -219,7 +211,6 @@ def gated_prior(args, dataset, pre_model, device):
         for j in range(len(dataset)):
             labels.append(2) 
     print(labels)
-    ## get prior distribution for different graphs
     new_dataset = []
     for i in range(len(dataset)):
         X = dataset[i]['X']

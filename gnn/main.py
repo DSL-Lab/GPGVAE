@@ -1,20 +1,16 @@
 import argparse
-import pickle
 import time
 import random
 import string
 import numpy as np
-import wandb
 import os
 import concurrent.futures
-
 import math
 import torch
 from torch.optim.lr_scheduler import LambdaLR
 from torch.utils.data import DataLoader
-from ema_pytorch import EMA
 from utils import get_encoder, get_decoder, mask_diagonal_and_sigmoid, reparameterization, gumbel_softmax, binary_concrete, nll_gaussian, kl_categorical_mc, kl_categorical_approx
-from evaluation import eval_baseline, eval, compute_validloss
+from evaluation import eval
 from small_model import SpecformerSmall, MLPClassification
 from get_dataset import data_preprocess, gated_prior, custom_train
 import warnings
@@ -30,8 +26,8 @@ parser.add_argument('--n_games', type=int, help='Number of games', default=100)
 parser.add_argument('--num_mix_component', type=int, help='Number of mix component', default=5)
 parser.add_argument('--alpha', type=float, help='Smoothness of marginal benefits', default=0.5)
 parser.add_argument('--target_spectral_radius', type=float, help='Target spectral radius', default=0.4)
-parser.add_argument('--n_epochs', type=int, help='Number of epochs', default=200)
-parser.add_argument('--patience', type=int, help='Early Stopping Patience', default=50)
+parser.add_argument('--n_epochs', type=int, help='Number of epochs', default=800)
+parser.add_argument('--patience', type=int, help='Early Stopping Patience', default=100)
 parser.add_argument('--lr', type=float, help='Learning rate', default=1e-4)
 parser.add_argument('--weight_decay', type=float, help='decay parameter in AdamW ', default=1e-5)
 parser.add_argument('--warm_up_epoch', type=int, help='Number of lr warm_up', default=5)
@@ -47,20 +43,17 @@ parser.add_argument('--trans_dropout', type=float, help='Transformer dropout', d
 parser.add_argument('--adj_dropout', type=float, help='Adjacency dropout', default=0.3)
 parser.add_argument('--hidden_dim_1st', type=int, help='Dimension of embeddings in first stage', default=64)
 parser.add_argument('--hidden_dim', type=int, help='Dimension of embeddings in second stage', default=256)
-parser.add_argument('--beta0', type=float, help='control weight of recon', default=1)
 parser.add_argument('--beta1', type=float, help='control weight of kl_A', default=10)
-parser.add_argument('--beta2', type=float, help='control weight of kl_A', default=1)
 parser.add_argument('--temp', type=float, default=0.5, help='Temperature for Gumbel softmax.')
 parser.add_argument('--hard', default=True, help='Uses discrete samples in training forward pass.')
-parser.add_argument('--encoderA', type=str, help='Types of encoder', default="transformer", choices=["per_game_transformer", "transformer", "mlp_encoder_2"])
-parser.add_argument('--encoderZ', type=str, help='Types of encoder', default="gcn_on_z", choices=["gcn_on_z", "mlp_on_seq", 'transformer_z'])
+parser.add_argument('--encoderA', type=str, help='Types of encoder', default="transformer")
+parser.add_argument('--encoderZ', type=str, help='Types of encoder', default="mlp_on_seq")
 parser.add_argument('--regenerate_data', action='store_true', help='Whether to regenerate the graphs')
 parser.add_argument('--noise_std', type=float, help='B noise std.', default=0.)
 parser.add_argument('--m', type=int, help='Barabasi-Albert parameter m', default=3)
 parser.add_argument('--action_signal_to_noise_ratio', type=float, help='Signal-to-noise ration in synthetic actions', default=10)
-parser.add_argument('--graph_type', type=str, help='Type of graph', default="indian_village", choices=["stochastic_block_model", "barabasi_albert", "erdos_renyi", "watts_strogatz", "indian_village", "PA_review", 'PA_rating', "LA_rating", 'LA_review', "NYC", "TKY", "IST","SaoPaulo","Jakarta","KualaLampur"])
+parser.add_argument('--graph_type', type=str, help='Type of graph', default="indian_village", choices=[ "barabasi_albert", "erdos_renyi", "watts_strogatz", "indian_village", "PA_review", 'PA_rating', "LA_rating", 'LA_review', "NYC","SaoPaulo"])
 parser.add_argument('--game_type', type=str, help='Type of game', default="village", choices=["linear_quadratic", "linear_influence", "barik_honorio", "Yelp", "Foursquare", "village"])
-parser.add_argument('--cost_distribution', type=str, help='Type of distribution to use to sample node-wise costs.', default="normal", choices=["normal", "uniform"])
 parser.add_argument('--pre_model_type', type = str, help='Type of model', default="Specformer", choices=["Specformer", "MLP", "Random"])
 parser.add_argument('--use_amp', action='store_true', help='Whether to use automatic mixed precision')
 parser.add_argument('--estimator', type=str, help='Types of estimator', default="concrete", choices=["soft_approx", "concrete", "reinforce", 'measure'])
@@ -85,12 +78,12 @@ def count_parameters(model):
 
 
 class Encoding(torch.nn.Module):
-    def __init__(self, encoderA_type, encoderZ_type, n_games, n_heads, n_nodes, hidden_dim, num_mix_component):
+    def __init__(self, encoderA_type, encoderZ_type, n_games, n_heads, hidden_dim, num_mix_component):
         super(Encoding, self).__init__()
         self.num_mix_component = num_mix_component
-        self.encoder_A = get_encoder(encoder_type=encoderA_type, n_games=n_games, n_heads=n_heads, n_nodes = n_nodes,
+        self.encoder_A = get_encoder(encoder_type=encoderA_type, n_games=n_games, n_heads=n_heads,
                             hidden_dim=hidden_dim, num_mix_component = num_mix_component)
-        self.encoder_Z = get_encoder(encoder_type=encoderZ_type, n_games=n_games, n_heads=n_heads, n_nodes = n_nodes,
+        self.encoder_Z = get_encoder(encoder_type=encoderZ_type, n_games=n_games, n_heads=n_heads,
                             hidden_dim=hidden_dim, num_mix_component = num_mix_component)
         
     def forward(self, X):
@@ -133,7 +126,6 @@ def reinforce_mc(param):
     s_alpha = torch.multinomial(torch.softmax(logit_alpha, -1), num_samples = 1, replacement=True) # B X 1
     prob_adj = prob_theta[:, :, :, s_alpha.item()] # B X N X N
     s_adj = torch.bernoulli(prob_adj) # B X N X N
-    # The Reinforce loss is just log_prob*loss
     eps = 1e-16
     adj_loss = torch.stack([(s_adj * (torch.log(prob_theta[0,:,:, kk] + eps)) + (1-s_adj) * (torch.log((1-prob_theta[0,:,:,kk]) + eps))) for kk in range(args.num_mix_component)], dim=1)  # B X K X N X N
     adj_loss = adj_loss.reshape(1, args.num_mix_component, args.n_nodes**2)
@@ -181,7 +173,7 @@ def run(args):
     args.n_nodes = max_nodes
     args.n_games = dataset[0]['X'].shape[1]
 
-    ###########  load pre-trained model  #############
+    ###########  you can use pretrain_interaction.py to pretrain an interaction encoder first. Here, we directly load the pre-trained interaction encoder.  #############
     if args.pre_model_type == 'MLP':
         pre_model = MLPClassification(n_eigen=args.n_eigen, hidden_dim=args.hidden_dim_1st).to(device)   
     elif args.pre_model_type == 'Specformer':
@@ -190,7 +182,7 @@ def run(args):
     new_dataset = gated_prior(args, dataset, pre_model, device)
     train_loader = DataLoader(new_dataset, batch_size = args.batch_size, collate_fn=custom_train, shuffle = True) # X_sets, A_sets, labels
     
-    Encoder = Encoding(encoderA_type = args.encoderA, encoderZ_type=args.encoderZ, n_games=args.n_games, n_heads=args.n_heads, n_nodes=args.n_nodes, hidden_dim=args.hidden_dim, num_mix_component=args.num_mix_component).to(device)
+    Encoder = Encoding(encoderA_type = args.encoderA, encoderZ_type=args.encoderZ, n_games=args.n_games, n_heads=args.n_heads, hidden_dim=args.hidden_dim, num_mix_component=args.num_mix_component).to(device)
     Decoder = Decoding(n_games=args.n_games, hidden_dim=args.hidden_dim, n_layer=args.n_layer, num_mix_component=args.num_mix_component).to(device)
     model = torch.nn.Sequential(Encoder, Decoder)
     print(f"Number of parameters: {count_parameters(model)}")
@@ -207,21 +199,17 @@ def run(args):
     model.train()
     print(device)
     scaler = torch.cuda.amp.GradScaler(enabled=args.use_amp)
-    # wandb.init(project="GPGVAE", entity="xueyu", config=args)
-    # wandb.watch(model, log="all", log_freq=10)
 
     for epoch in range(args.n_epochs):
         start = time.time()    
-        beta0 = args.beta0         
-        beta1 = args.beta1  # KL A
-        beta2 = args.beta2  # KL Z 
+        beta1 = args.beta1  # to balance the KL divergence of graph encoder and the reconstruction loss
         epoch_loss = 0
         train_REloss = 0
         train_KLAloss = 0
         train_KLZloss = 0
         for data in train_loader:
             optimizer.zero_grad()
-            X, _, _, prior_i = data     # B X N X G, B X N X N, B
+            X, _, _, prior_i = data    
             X, prior_i = X.to(device), prior_i.to(device)    # B X N X G, B
 
             with torch.autocast(device_type=device, dtype=torch.float16, enabled=args.use_amp):
@@ -229,9 +217,8 @@ def run(args):
                 prob_theta = torch.stack([mask_diagonal_and_sigmoid(logit_theta[:,:,:,kk]) for kk in range(args.num_mix_component)], dim = -1) 
                 if args.estimator == 'concrete':
                     loss_nll = 0
-                    with concurrent.futures.ThreadPoolExecutor() as executor:
-                        for nll in executor.map(concrete_mc, [(X, Z_mu, Z_logstd, logit_alpha, logit_theta, Decoder, args, ii) for ii in range(args.nll_nsample)]):
-                            loss_nll += nll/args.nll_nsample
+                    for ii in range(args.nll_nsample):
+                        loss_nll += concrete_mc((X, Z_mu, Z_logstd, logit_alpha, logit_theta, Decoder, args, ii))/args.nll_nsample
                 
                 elif args.estimator == 'reinforce':
                     loss_nll = 0
@@ -240,13 +227,6 @@ def run(args):
                         for nll, reinforce_loss in executor.map(reinforce_mc, [(X, Z_mu, Z_logstd, logit_alpha, prob_theta, Decoder, args, ii) for ii in range(args.nll_nsample)]):
                             loss_nll += (eta * nll + (1-eta)*old_null  + reinforce_loss - reinforce_loss.detach())/args.nll_nsample                        
                     old_null = loss_nll.detach()
-
-                elif args.estimator == 'soft_approx':
-                    sample_Z = reparameterization(Z_mu, Z_logstd) # node latent variables  B X N X H 
-                    prob_alpha = torch.softmax(logit_alpha, -1)
-                    prob_adj = torch.stack([prob_theta[num] @ prob_alpha[num].reshape(args.num_mix_component, 1) for num in range(args.n_graphs)], dim = 0).squeeze(-1) # B X N X N        
-                    Xmu, X_logstd = Decoder(sample_Z.to(device), prob_adj.to(device))
-                    loss_nll = nll_gaussian(Xmu, X, X_logstd)
 
                 elif args.estimator == 'measure':
                     loss_nll = 0
@@ -281,17 +261,11 @@ def run(args):
                 kl_A, kl_Z = kl_categorical_mc(prob_theta, logit_alpha, args.temp, Z_mu, prior_i, args.klA_nsample) 
                 ## Approximate KL divergence
                 # kl_A, kl_Z = kl_categorical_approx(prob_theta, logit_alpha, Z_mu, prior_i)
-                ## regularized term
-                # loss_regu = torch.norm(prob_theta[0], p=1) - torch.sum(torch.diagonal(prob_theta[0], dim1=0, dim2=1, offset=0))
-                loss = beta0 * loss_nll + beta1 * kl_A + beta2 * kl_Z 
+                loss =  loss_nll + beta1 * kl_A + kl_Z 
 
             scaler.scale(loss).backward()            
             scaler.step(optimizer)
             scaler.update()
-            # if epoch < 5:
-            #for name, p in model[0].named_parameters():
-            #    print(name, torch.norm(p))
-            # ema.update()
             epoch_loss += loss
             train_KLAloss += kl_A
             train_KLZloss += kl_Z
@@ -304,11 +278,8 @@ def run(args):
         train_KLAloss /= len(train_loader)
         train_KLZloss /= len(train_loader)
         train_REloss /= len(train_loader)
-        train_roc_auc, _, _, _, train_ap, *_ = eval(Encoder = Encoder, data_loader=train_loader, device=device) 
-        # wandb.log({"prob_theta": wandb.Histogram(prob_theta.detach().cpu().numpy())})     
-        # wandb.log({"prob_alpha": wandb.Histogram(prob_alpha.detach().cpu().numpy())})
-        # wandb.log({"epoch_loss": epoch_loss, "RE_loss": train_REloss, "A_loss":train_KLAloss, "Z_loss":train_KLZloss, "roc_auc":train_roc_auc, 'ap':train_ap})
-        print(f"Epoch {epoch + 1} -- Loss: {epoch_loss.item():.4f} -- A_KLLoss: {train_KLAloss.item():.4f} -- Z_KLLoss: {train_KLZloss:.4f} -- RECONLoss: {train_REloss:.4f} -- ROC_AUC: {train_roc_auc:.4f} -- AP: {train_ap:.4f}. It took {time.time() - start:.2f}s")       
+        train_roc_auc = eval(Encoder = Encoder, data_loader=train_loader, device=device) 
+        print(f"Epoch {epoch + 1} -- Loss: {epoch_loss.item():.4f} -- A_KLLoss: {train_KLAloss.item():.4f} -- Z_KLLoss: {train_KLZloss:.4f} -- RECONLoss: {train_REloss:.4f} -- ROC_AUC: {train_roc_auc:.4f}. It took {time.time() - start:.2f}s")       
         if epoch == 1:
             t = torch.cuda.get_device_properties(0).total_memory / 1024**2
             r = torch.cuda.memory_reserved(0) / 1024**2
@@ -325,26 +296,12 @@ def run(args):
             print("Early stopping")
             break
     
-    # wandb.finish()
-    # torch.save(prob_theta.detach().cpu(), 'gpgvae_theta.pt')
     print("#################################")
     print("Evaluating best model")
     model.load_state_dict(torch.load(model_path))
-    model.eval()
-    args.model_to_train = 'latent'
-              
-    ### compute all matrics
-    # valid_obj1, valid_obj2 = compute_validloss(Encoder, train_loader, device)
-    roc_mean, roc_std, mse_mean, mse_std, ap_mean, ap_std, f1score_mean, f1score_std  = eval(Encoder = Encoder, data_loader=train_loader, device=device)
+    model.eval()       
+    roc_mean, roc_std  = eval(Encoder = Encoder, data_loader=train_loader, device=device)
     print(f"final ROC_AUC: {roc_mean:.4f}+-{roc_std:.4f}")
-    print(f"final MSE: {mse_mean:.8f}+-{mse_std:.8f}.")
-    print(f"final Averaged Precision: {ap_mean:.4f}+-{ap_std:.4f}.")
-    print(f"final F1 score: {f1score_mean:.4f}+-{f1score_std:.4f}.")
-    # print(f"final valid_obj1: {valid_obj1:.4f} --obj2:{valid_obj2}.")
-
-    # # baseline methods
-    # baseline_results = eval_baseline(new_dataset)
-    # models_results["baseline"] = baseline_results
 
 
 if __name__ == "__main__":
