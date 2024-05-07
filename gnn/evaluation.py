@@ -25,12 +25,12 @@ def eval(Encoder, data_loader, device):
             for j in range(n_graphs):
                 A_true_j = A_true[j:j+1, :length[j], :length[j]]
                 if K == 1:
-                    A_pred_j = prob_theta[j, :, :, 0]
+                    A_pred_j = prob_theta[j, :length[j], :length[j], 0]
                 else:
                     alpha_list = torch.multinomial(prob_alpha[j], n_samples, replacement=True).tolist()
                     A_pred_j = torch.zeros_like(A_true_j)
                     for ii in range(n_samples):
-                        A_pred_j += sample_binary(prob_theta[j, :, :, alpha_list[ii]])/n_samples
+                        A_pred_j += sample_binary(prob_theta[j, :length[j], :length[j], alpha_list[ii]])/n_samples
                 roc_score = compute_roc_auc_score(A_true_j, A_pred_j)   
                 roc_aucs.append(roc_score)       
 

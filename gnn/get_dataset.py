@@ -145,10 +145,13 @@ def custom_train(samples):
         pad_A = A.new_zeros([max_nodes, max_nodes]) # padding eigenvectors with zero
         pad_A[:num_nodes, :num_nodes] = A
 
+        pad_prior = prior.new_zeros([max_nodes, max_nodes]) # padding eigenvectors with zero
+        pad_prior[:num_nodes, :num_nodes] = prior
+
         X_sets.append(pad_X)
         A_sets.append(pad_A)
         length.append(num_nodes)
-        priors.append(prior)
+        priors.append(pad_prior)
 
     X_sets = torch.stack(X_sets, 0)  # [B, N]
     A_sets = torch.stack(A_sets, 0)  # [B, N, N]
@@ -170,7 +173,10 @@ def gated_prior(args, dataset, pre_model, device):
     data_loader = DataLoader(dataset,  batch_size = args.batch_size, collate_fn=custom_collate, shuffle = False)
 
     if args.pre_model_type == 'Specformer':
-        pre_modelpath = f"../data/models/Specformer_random5000.pt"
+        if args.game_type == 'Yelp' or args.game_type == 'Foursquare' or args.game_type == 'village':
+            pre_modelpath = f"../data/models/Specformer_random5000.pt"
+        else:
+            pre_modelpath = f"../data/models/Specformer.pt"  # pre-trained model for synthetic games
         pre_model.load_state_dict(torch.load(pre_modelpath))
         pre_model = pre_model.to(device)
         pre_model.eval()       
@@ -188,7 +194,7 @@ def gated_prior(args, dataset, pre_model, device):
         del pre_model
         torch.cuda.empty_cache()
     elif args.pre_model_type == 'MLP':
-        pre_modelpath = f"../data/models/MLP_5000.pt"
+        pre_modelpath = f"../data/models/MLP.pt"
         pre_model.load_state_dict(torch.load(pre_modelpath))
         pre_model = pre_model.to(device)
         pre_model.eval()

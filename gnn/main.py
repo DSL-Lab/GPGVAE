@@ -23,10 +23,10 @@ parser.add_argument('--seed', type=int, default=12, help='Random seed.')
 parser.add_argument('--n_graphs', type=int, help='Number of graphs', default=1)
 parser.add_argument('--n_nodes', type=int, help='Number of nodes', default=20)
 parser.add_argument('--n_games', type=int, help='Number of games', default=100)  
-parser.add_argument('--num_mix_component', type=int, help='Number of mix component', default=5)
+parser.add_argument('--num_mix_component', type=int, help='Number of mix component', default=1)
 parser.add_argument('--alpha', type=float, help='Smoothness of marginal benefits', default=0.5)
 parser.add_argument('--target_spectral_radius', type=float, help='Target spectral radius', default=0.4)
-parser.add_argument('--n_epochs', type=int, help='Number of epochs', default=800)
+parser.add_argument('--n_epochs', type=int, help='Number of epochs', default=200)
 parser.add_argument('--patience', type=int, help='Early Stopping Patience', default=100)
 parser.add_argument('--lr', type=float, help='Learning rate', default=1e-4)
 parser.add_argument('--weight_decay', type=float, help='decay parameter in AdamW ', default=1e-5)
@@ -56,7 +56,7 @@ parser.add_argument('--graph_type', type=str, help='Type of graph', default="ind
 parser.add_argument('--game_type', type=str, help='Type of game', default="village", choices=["linear_quadratic", "linear_influence", "barik_honorio", "Yelp", "Foursquare", "village"])
 parser.add_argument('--pre_model_type', type = str, help='Type of model', default="Specformer", choices=["Specformer", "MLP", "Random"])
 parser.add_argument('--use_amp', action='store_true', help='Whether to use automatic mixed precision')
-parser.add_argument('--estimator', type=str, help='Types of estimator', default="concrete", choices=["soft_approx", "concrete", "reinforce", 'measure'])
+parser.add_argument('--estimator', type=str, help='Types of estimator', default="reinforce", choices=["soft_approx", "concrete", "reinforce", 'measure'])
 parser.add_argument('--eta', type=float, help='control weight of reinforce', default=0.99)
 parser.add_argument('--klA_nsample', type=int, help='Number of samples for KL A', default=50)
 parser.add_argument('--nll_nsample', type=int, help='Number of samples for reconstruction loss', default=1)
@@ -121,26 +121,28 @@ def concrete_mc(param):
 
 def reinforce_mc(param):
     X, Z_mu, Z_logstd, logit_alpha, prob_theta, Decoder, args, ii = param
+    n_graphs, n_nodes, n_dim = X.shape[0], X.shape[1], X.shape[2]
     device = Z_mu.device
     sample_Z = reparameterization(Z_mu, Z_logstd) # node latent variables  B X N X H 
     s_alpha = torch.multinomial(torch.softmax(logit_alpha, -1), num_samples = 1, replacement=True) # B X 1
-    prob_adj = prob_theta[:, :, :, s_alpha.item()] # B X N X N
+    prob_adj = torch.stack([prob_theta[ii,:,:, s_alpha[ii].item()] for ii in range(X.shape[0])], dim = 0)
     s_adj = torch.bernoulli(prob_adj) # B X N X N
     eps = 1e-16
-    adj_loss = torch.stack([(s_adj * (torch.log(prob_theta[0,:,:, kk] + eps)) + (1-s_adj) * (torch.log((1-prob_theta[0,:,:,kk]) + eps))) for kk in range(args.num_mix_component)], dim=1)  # B X K X N X N
-    adj_loss = adj_loss.reshape(1, args.num_mix_component, args.n_nodes**2)
-    adj_loss = torch.sum(adj_loss, dim = -1)/(args.n_nodes**2)  # B X K
+    adj_loss = torch.stack([(s_adj * (torch.log(prob_theta[:,:,:, kk] + eps)) + (1-s_adj) * (torch.log((1-prob_theta[:,:,:,kk]) + eps))) for kk in range(args.num_mix_component)], dim=1)  # B X K X N X N
+    adj_loss = adj_loss.reshape(n_graphs, args.num_mix_component, n_nodes**2)
+    adj_loss = torch.sum(adj_loss, dim = -1)/(n_nodes**2)  # B X K
     log_alpha = torch.log_softmax(logit_alpha, -1)  # B X K
     log_prob = adj_loss + log_alpha
     log_prob = torch.logsumexp(log_prob, dim=1) # B X 1
-
-    mask = ~torch.eye(prob_adj.shape[1], dtype=bool, device=prob_adj.device).repeat(prob_adj.shape[0],1,1)
+    mask = ~torch.eye(n_nodes, dtype=bool, device=prob_adj.device).repeat(n_graphs,1,1)
     s_adj = s_adj * mask
     Xmu, X_logstd = Decoder(sample_Z.to(device), s_adj.to(device))     # B X N X G  G: n_games
-    nll = nll_gaussian(Xmu, X, X_logstd)
-
+    variance = torch.exp(2*X_logstd)
+    neg_log_p = X_logstd + torch.div(torch.pow(Xmu - X, 2), 2.*np.exp(2. * variance))  # B X N X G
+    nll = torch.sum(neg_log_p.reshape(n_graphs, n_nodes*n_dim), dim = -1)/(n_nodes*n_dim)  # B X 1
     reinforce_loss = torch.mean(log_prob*nll.detach())
-    return nll, reinforce_loss
+    return nll.mean(), reinforce_loss
+
 
 
 def sample_loss(args):
@@ -257,10 +259,11 @@ def run(args):
                     theta_grads.zero_()
                     alpha_grads.zero_()
 
-                ## MC sampling for KL divergence
-                kl_A, kl_Z = kl_categorical_mc(prob_theta, logit_alpha, args.temp, Z_mu, prior_i, args.klA_nsample) 
-                ## Approximate KL divergence
-                # kl_A, kl_Z = kl_categorical_approx(prob_theta, logit_alpha, Z_mu, prior_i)
+                if args.game_type == 'Yelp':
+                    kl_A, kl_Z = kl_categorical_approx(prob_theta, logit_alpha, Z_mu, prior_i)  ## Approximate KL divergence
+                else:
+                    kl_A, kl_Z = kl_categorical_mc(prob_theta, logit_alpha, args.temp, Z_mu, prior_i, args.klA_nsample)  ## MC sampling for KL divergence     ## MC sampling for KL divergence
+
                 loss =  loss_nll + beta1 * kl_A + kl_Z 
 
             scaler.scale(loss).backward()            
@@ -278,7 +281,7 @@ def run(args):
         train_KLAloss /= len(train_loader)
         train_KLZloss /= len(train_loader)
         train_REloss /= len(train_loader)
-        train_roc_auc = eval(Encoder = Encoder, data_loader=train_loader, device=device) 
+        train_roc_auc, _ = eval(Encoder = Encoder, data_loader=train_loader, device=device) 
         print(f"Epoch {epoch + 1} -- Loss: {epoch_loss.item():.4f} -- A_KLLoss: {train_KLAloss.item():.4f} -- Z_KLLoss: {train_KLZloss:.4f} -- RECONLoss: {train_REloss:.4f} -- ROC_AUC: {train_roc_auc:.4f}. It took {time.time() - start:.2f}s")       
         if epoch == 1:
             t = torch.cuda.get_device_properties(0).total_memory / 1024**2
