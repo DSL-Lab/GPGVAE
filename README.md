@@ -69,16 +69,17 @@ Here,
 If you find our work is useful, please cite the [paper]():
 
     Xue Yu, Muchen Li, Yan Leng, and Renjie Liao. Learning Latent Structures in Network Games via Data-Dependent Gated-Prior Graph Variational Autoencoders. ICML 2024.
-    ```
-@inproceedings{
-yu2024learning,
-title={Learning Latent Structures in Network Games via Data-Dependent Gated-Prior Graph Variational Autoencoders},
-author={Xue Yu and Muchen Li and Yan Leng and Renjie Liao},
-booktitle={Forty-first International Conference on Machine Learning},
-year={2024},
-url={https://openreview.net/forum?id=kKWjZoaRLv}
-}
-    ```
+    
+   '''
+   @inproceedings{
+      yu2024learning,
+      title={Learning Latent Structures in Network Games via Data-Dependent Gated-Prior Graph Variational Autoencoders},
+      author={Xue Yu and Muchen Li and Yan Leng and Renjie Liao},
+      booktitle={Forty-first International Conference on Machine Learning},
+      year={2024},
+      url={https://openreview.net/forum?id=kKWjZoaRLv}
+      }
+    '''
 
 ## Contact
 
