@@ -68,7 +68,7 @@ Here,
 
 If you find our work is useful, please cite the [paper]():
 ```
-@@inproceedings{
+@inproceedings{
       yu2024learning,
       title={Learning Latent Structures in Network Games via Data-Dependent Gated-Prior Graph Variational Autoencoders},
       author={Xue Yu and Muchen Li and Yan Leng and Renjie Liao},
